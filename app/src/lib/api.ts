@@ -15,6 +15,7 @@ import username from 'username'
 import { GitProtocol } from './remote-parsing'
 import { Emitter } from 'event-kit'
 import JSZip from 'jszip'
+import { remote } from 'electron'
 
 const envEndpoint = process.env['DESKTOP_GITHUB_DOTCOM_API_ENDPOINT']
 const envHTMLURL = process.env['DESKTOP_GITHUB_DOTCOM_HTML_URL']
@@ -1077,12 +1078,59 @@ export class API {
    * If it fails to retrieve or parse the zip file, it will return null.
    */
   public async fetchWorkflowRunJobLogs(logsUrl: string): Promise<JSZip | null> {
-    const customHeaders = {
-      Accept: 'application/vnd.github.antiope-preview+json',
-    }
-    const response = await this.request('GET', logsUrl, {
-      customHeaders,
+    const zipURL: string | null = await new Promise(resolve => {
+      const customHeaders = {
+        Accept: 'application/vnd.github.antiope-preview+json',
+      }
+
+      remote.session.defaultSession.webRequest.onBeforeRedirect(details => {
+        if (
+          details.responseHeaders === undefined ||
+          details.responseHeaders.location.length === 0
+        ) {
+          // shouldn't happen...
+          resolve(null)
+          return
+        }
+
+        const redirectURL = URL.parse(details.responseHeaders.location[0])
+        if (
+          redirectURL.host !== 'pipelines.actions.githubusercontent.com' ||
+          redirectURL.protocol !== 'https:'
+        ) {
+          // This means some other request happened at the same time that
+          // redirects. We will lose this call to the logs. Considered a
+          // timer... but that feels hacky for an unlikely edge case..
+          resolve(null)
+          return
+        }
+
+        resolve(redirectURL.href)
+      })
+
+      this.request('GET', logsUrl, {
+        customHeaders,
+      }).then(response => {
+        // Something other than redirect happend so resolve to null
+        // so that we are not waiting for onBeforeRedirect for forever...
+        if (response.type !== 'opaqueredirect') {
+          resolve(null)
+        }
+      })
     })
+
+    remote.session.defaultSession.webRequest.onBeforeRedirect(null)
+
+    if (zipURL === null) {
+      return null
+    }
+
+    const response = await request(
+      this.endpoint,
+      null, // Do not send token!
+      'GET',
+      zipURL
+    )
 
     try {
       const zipBlob = await response.blob()
